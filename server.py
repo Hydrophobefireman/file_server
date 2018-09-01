@@ -3,9 +3,10 @@ import os
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs as _parse_qs
+import re
 
-HOST_NAME = "localhost"
-PORT_NUMBER = os.environ.get("PORT", 8000)
+HOST_NAME = "0.0.0.0"
+PORT_NUMBER = os.environ.get("PORT", 8080)
 
 paths = {"/": "index.html", "/files": "files.html"}
 try:
@@ -29,20 +30,25 @@ class Handler(BaseHTTPRequestHandler):
             "/files": {"status": 200},
             "/": {"status": 200},
         }
+        self.protocol_version = "HTTP/1.1"
         _path = self.path.split("?")[0]
         if _path in paths:
             self.respond(paths[_path])
         else:
-            self.send_response(500)
+            self.send_response(404)
 
     def handle_http(self, status_code, path):
         self.send_response(status_code)
+
         content = self.check_content(path)
-        return bytes(content, "UTF-8")
+        if content:
+            return bytes(content, "UTF-8")
 
     def respond(self, opts):
         response = self.handle_http(opts["status"], self.path)
-        self.wfile.write(response)
+        if response:
+            print(response)
+            self.wfile.write(response)
 
     def check_content(self, qspath):
         to_serve = ""
@@ -57,13 +63,43 @@ class Handler(BaseHTTPRequestHandler):
             return to_serve
         elif path == "/files":
             name = parse_qs(qspath)["f"][0]
-            with open(name, "rb") as files:
-                extension = "." + name.split(".")[-1]
-                ct = mimes.get(extension, "application/octet-stream")
-                self.send_header("Content-Type", ct)
-                self.send_header("Accept-Ranges", "None")
-                self.end_headers()
-                self.wfile.write(files.read())
+            file_size = os.path.getsize(name)
+            extension = "." + name.split(".")[-1]
+            ct = mimes.get(extension, "application/octet-stream")
+            if (
+                not self.headers.get("range")
+                or self.headers.get("range", "none").lower() == "none"
+            ):
+                with open(name, "rb") as files:
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Accept-Ranges", "Bytes")
+                    self.send_header("Content-Length", file_size)
+                    self.end_headers()
+                    self.wfile.write(files.read())
+            else:
+                rangeA, rangeB, content_length = parse_range(
+                    self.headers.get("range", "bytes=0-").lower().split("bytes=")[1],
+                    file_size,
+                )
+                with open(name, "rb") as files:
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Accept-Range", "Bytes")
+                    self.send_header("Content-Length", content_length)
+                    self.send_header(
+                        "Content-Range", f"bytes {rangeA}-{rangeB}/{file_size}"
+                    )
+                    self.end_headers()
+                    files.seek(rangeA)
+                    self.send_response(206)
+                    self.wfile.write(files.read(content_length))
+
+
+def parse_range(range_str, file_length):
+    rng = re.search(r"(?P<start>\d+)-(?P<end>\d+|)", range_str)
+    start = int(rng.group("start"))
+    _end = rng.group("end")
+    end = file_length - 1 if not _end else int(_end)
+    return start, end, (end - start + 1)
 
 
 def parse_qs(_path):
@@ -73,11 +109,12 @@ def parse_qs(_path):
 
 if __name__ == "__main__":
     server_class = HTTPServer
-    httpd = server_class((HOST_NAME, PORT_NUMBER), Handler)
+    server = server_class((HOST_NAME, PORT_NUMBER), Handler)
+    app = server.serve_forever
     print(time.asctime(), "Server Starts - %s:%s" % (HOST_NAME, PORT_NUMBER))
     try:
-        httpd.serve_forever()
+        app()
     except KeyboardInterrupt:
         pass
-    httpd.server_close()
+    server.server_close()
     print(time.asctime(), "Server Stops - %s:%s" % (HOST_NAME, PORT_NUMBER))
